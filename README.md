@@ -6,7 +6,6 @@
 
 ```txt
 miniLLM-engine/
-│
 ├── trainer/          # 训练
 ├── inference/        # 推理
 ├── serving/          # FastAPI 服务
