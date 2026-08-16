@@ -1,118 +1,169 @@
+import math
+import time
+from pathlib import Path
+
 import torch
-from torch import nn
-from typing import Iterable, Optional
 from tqdm import tqdm
 
-from dataclasses import dataclass
-
+from trainer.loss.cross_entropy import cross_entropy
 from trainer.utils.gradient_clip import gradient_clipping
-
-
-@dataclass
-class TrainStats:
-    step: int
-    loss: float
-    grad_norm: float
-    lr: float
 
 
 class Trainer:
     def __init__(
         self,
-        model: nn.Module,
-        optimizer: torch.optim.Optimizer,
+        model,
+        optimizer,
         scheduler=None,
-        loss_fn=None,
-        device: torch.device | None = None,
-        max_grad_norm: float | None = None,
-        grad_clip_norm_type: float = 2.0,
-        log_interval: int = 10,
+        train_loader=None,
+        valid_loader=None,
+        device="cpu",
+        grad_clip=None,
+        log_interval=10,
+        eval_interval=500,
+        eval_steps=50,
+        checkpoint_dir=None,
+        use_wandb=False,
+        wandb_project=None,
+        wandb_run_name=None,
     ):
-        self.model = model
+        self.model = model.to(device)
         self.optimizer = optimizer
         self.scheduler = scheduler
-        self.loss_fn = (
-            loss_fn
-            if loss_fn is not None
-            else nn.CrossEntropyLoss()
-        )
-        if device is None:
-            try:
-                device = next(model.parameters()).device
-            except StopIteration:
-                device = torch.device("cpu")
-                
-        self.device = device
-        self.max_grad_norm = max_grad_norm
-        self.grad_clip_norm_type = grad_clip_norm_type
+        self.train_loader = train_loader
+        self.valid_loader = valid_loader
+        self.device = torch.device(device)
+        self.grad_clip = grad_clip
         self.log_interval = log_interval
+        self.eval_interval = eval_interval
+        self.eval_steps = eval_steps
+        self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir is not None else None
+        
+        if self.checkpoint_dir is not None:
+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.use_wandb = use_wandb
+        if use_wandb:
+            import wandb
+            self.wandb = wandb
+            wandb.init(project=wandb_project, name=wandb_run_name)
+        else:
+            self.wandb = None
         self.global_step = 0
-        self.model.to(self.device)
-    
-    
-    def _move_batch(self, input_ids: torch.Tensor, labels: torch.Tensor):
-        return (input_ids.to(self.device), labels.to(self.device))
-    
-    
-    def _get_lr(self) -> float:
+
+
+    def train(self, max_steps: int):
+        self.model.train()
+        data_iter = iter(self.train_loader)
+        pbar = tqdm(range(max_steps), desc="Training")
+        running_loss = 0.0
+        
+        for _ in pbar:
+            try:
+                input_ids, labels = next(data_iter)
+            except StopIteration:
+                data_iter = iter(self.train_loader)
+                input_ids, labels = next(data_iter)
+            input_ids = input_ids.to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
+            start_time = time.perf_counter()
+            self.optimizer.zero_grad(set_to_none=True)
+            logits = self.model(input_ids)
+            loss = cross_entropy(logits, labels)
+            loss.backward()
+            grad_norm = None
+            if self.grad_clip is not None:
+                grad_norm = gradient_clipping(self.model.parameters(), self.grad_clip)
+            self.optimizer.step()
+            if self.scheduler is not None:
+                self.scheduler.step()
+            elapsed = time.perf_counter() - start_time
+            self.global_step += 1
+            loss_value = loss.item()
+            running_loss += loss_value
+            ppl = math.exp(min(loss_value, 20))
+            tokens_per_second = input_ids.numel() / elapsed
+            lr = self._get_lr()
+            metrics = {
+                "train/loss": loss_value,
+                "train/ppl": ppl,
+                "train/lr": lr,
+                "train/tokens_per_sec": tokens_per_second,
+            }
+            if grad_norm is not None:
+                metrics["train/grad_norm"] = grad_norm
+            if self.global_step % self.log_interval == 0:
+                pbar.set_postfix(
+                    loss=f"{loss_value:.4f}",
+                    ppl=f"{ppl:.2f}",
+                    lr=f"{lr:.2e}",
+                )
+                self._log(metrics)
+            if (
+                self.valid_loader is not None
+                and self.global_step % self.eval_interval == 0
+            ):
+                valid_metrics = self.evaluate()
+                self._log(valid_metrics)
+                pbar.set_postfix(
+                    loss=f"{loss_value:.4f}",
+                    val_loss=f"{valid_metrics['valid/loss']:.4f}",
+                    ppl=f"{valid_metrics['valid/ppl']:.2f}",
+                )
+                self.save_checkpoint()
+        
+        self.save_checkpoint()
+        return {"train_loss": running_loss / max_steps}
+
+
+    @torch.no_grad()
+    def evaluate(self):
+        self.model.eval()
+        total_loss = 0.0
+        steps = 0
+        for input_ids, labels in self.valid_loader:
+            input_ids = input_ids.to(self.device, non_blocking=True)
+            labels = labels.to(self.device, non_blocking=True)
+            logits = self.model(input_ids)
+            loss = cross_entropy(logits, labels)
+            total_loss += loss.item()
+            steps += 1
+            if steps >= self.eval_steps:
+                break
+        loss = total_loss / max(steps, 1)
+        ppl = math.exp(min(loss, 20))
+        self.model.train()
+        return {"valid/loss": loss, "valid/ppl": ppl}
+
+
+    def save_checkpoint(self):
+        if self.checkpoint_dir is None:
+            return
+        checkpoint = {
+            "model": self.model.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "global_step": self.global_step,
+        }
+        if self.scheduler is not None:
+            checkpoint["scheduler"] = self.scheduler.state_dict()
+        path = self.checkpoint_dir / f"checkpoint_{self.global_step}.pt"
+        torch.save(checkpoint, path)
+
+
+    def load_checkpoint(self, path):
+        checkpoint = torch.load(path, map_location=self.device)
+        self.model.load_state_dict(checkpoint["model"])
+        self.optimizer.load_state_dict(checkpoint["optimizer"])
+        if self.scheduler is not None and "scheduler" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler"])
+        self.global_step = checkpoint["global_step"]
+
+
+    def _get_lr(self):
         if self.scheduler is not None:
             return self.scheduler.get_lr()
         return self.optimizer.param_groups[0]["lr"]
-    
-    
-    def train_step(self, input_ids: torch.Tensor, labels: torch.Tensor):
-        self.model.train()
-        input_ids, labels = self._move_batch(input_ids, labels)
-        
-        self.optimizer.zero_grad(set_to_none=True)
-        logits = self.model(input_ids)
-        loss = self.loss_fn(
-            logits.reshape(-1, logits.size(-1)),
-            labels.reshape(-1),
-        )
-        loss.backward()
-        
-        grad_norm = 0.0
-        if self.max_grad_norm is not None:
-            grad_norm = gradient_clipping(
-                self.model.parameters(),
-                max_norm=self.max_grad_norm,
-                norm_type=self.grad_clip_norm_type,
-            )
-        
-        if self.scheduler is not None:
-            self.scheduler.step()
-            lr = self.scheduler.get_lr()
-            for group in self.optimizer.param_groups:
-                group["lr"] = lr
-        else:
-            lr = self.optimizer.param_groups[0]["lr"]
-            
-        self.optimizer.step()
-        self.global_step += 1
-        return TrainStats(step=self.global_step, loss=loss.item(), grad_norm=grad_norm, lr=lr)
-    
-    
-    def fit(self, dataloader: Iterable, num_steps: int):
-        stats = []
-        iterator = iter(dataloader)
-        pbar = tqdm(total=num_steps, desc="Training", dynamic_ncols=True)
-        for _ in range(num_steps):
-            try:
-                batch = next(iterator)
-            except StopIteration:
-                iterator = iter(dataloader)
-                batch = next(iterator)
-            
-            input_ids, labels = batch
-            train_stats = self.train_step(input_ids, labels)
-            stats.append(train_stats)
-            
-            pbar.set_postfix({
-                "loss": f"{train_stats.loss:.6f}",
-                "grad": f"{train_stats.grad_norm:.6f}",
-                "lr": f"{train_stats.lr:.6e}"
-            })
-            pbar.update(1)
-        pbar.close()
-        return stats
+
+
+    def _log(self, metrics):
+        if self.wandb is not None:
+            self.wandb.log(metrics, step=self.global_step)

@@ -1,0 +1,40 @@
+{
+  "os":  "Windows-11-10.0.26200-SP0",
+  "python":  "CPython 3.12.10",
+  "startedAt":  "2026-08-16T14:20:53.359147Z",
+  "program":  "C:\\Users\\mulberry\\workspace\\miniLLM-engine\\examples\\train_tinystories.py",
+  "codePath":  "examples\\train_tinystories.py",
+  "codePathLocal":  "examples\\train_tinystories.py",
+  "git":  {
+    "remote":  "https://github.com/mulberyn/miniLLM-engine.git",
+    "commit":  "a1c3e5f02f534e395410409d86279080dca5d7c9"
+  },
+  "email":  "mulberyn@gmail.com",
+  "root":  "C:\\Users\\mulberry\\workspace\\miniLLM-engine",
+  "host":  "DESKTOP-V5E4NI4",
+  "executable":  "c:\\Users\\mulberry\\workspace\\miniLLM-engine\\.venv\\Scripts\\python.exe",
+  "cpu_count":  14,
+  "cpu_count_logical":  20,
+  "gpu":  "NVIDIA GeForce RTX 3060 Laptop GPU",
+  "gpu_count":  1,
+  "disk":  {
+    "/":  {
+      "total":  "1023170048000",
+      "used":  "276782604288"
+    }
+  },
+  "memory":  {
+    "total":  "33956737024"
+  },
+  "gpu_nvidia":  [
+    {
+      "name":  "NVIDIA GeForce RTX 3060 Laptop GPU",
+      "memoryTotal":  "6442450944",
+      "cudaCores":  3840,
+      "architecture":  "Ampere",
+      "uuid":  "GPU-ca5ba602-f5a9-3246-396f-af413fdfa07a"
+    }
+  ],
+  "cudaVersion":  "13.1",
+  "writerId":  "id71a4dzn0uqgrsju7sqj3wxe28emmwa"
+}
