@@ -5,11 +5,6 @@ def cross_entropy(
     out_logits: torch.Tensor,
     targets: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Args:
-        out_logits: [..., vocab_size]
-        targets:    [...]
-    """
     assert out_logits.shape[:-1] == targets.shape
     log_probs = out_logits - torch.logsumexp(
         out_logits,

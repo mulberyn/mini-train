@@ -60,6 +60,7 @@ def test_cross_entropy_device(device):
     expected = F.cross_entropy(logits, targets)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
 
+
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 def test_cross_entropy_dtype(dtype):
     if not torch.cuda.is_available():
