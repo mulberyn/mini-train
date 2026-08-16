@@ -21,3 +21,4 @@ docs/plan.md
 /data/
 /tokenizer/
 /artifacts/
+/wandb/
