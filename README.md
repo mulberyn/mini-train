@@ -17,4 +17,10 @@ miniLLM-engine/
 └── configs/          # 配置文件
 ```
 
-## TinyStories 训练流程
+## 训练框架
+
+可以看作课程 [cs336 Spring 2026](https://cs336.stanford.edu/) 的拓展，还在学习/开发中。
+
+## 推理框架
+
+还在学习/开发中
