@@ -16,3 +16,5 @@ miniLLM-engine/
 ├── examples/         # 示例
 └── configs/          # 配置文件
 ```
+
+## TinyStories 训练流程
