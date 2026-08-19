@@ -1,5 +1,6 @@
 from pathlib import Path
 import torch
+from trainer.config import save_model_config
 from trainer.tokenizer.bpe_tokenizer import BPETokenizer
 from trainer.data.prepare import tokenize_file
 from trainer.data.dataloader import create_dataloader
@@ -15,6 +16,7 @@ ARTIFACT_DIR = ROOT / "artifacts"
 TRAIN_TEXT = DATA_DIR / "TinyStoriesV2-GPT4-train.txt"
 VALID_TEXT = DATA_DIR / "TinyStoriesV2-GPT4-valid.txt"
 TOKENIZER_FILE = ARTIFACT_DIR / "tokenizer.json"
+MODEL_CONFIG_FILE = ARTIFACT_DIR / "model_config.json"
 TRAIN_TOKENS = ARTIFACT_DIR / "train.bin"
 VALID_TOKENS = ARTIFACT_DIR / "valid.bin"
 
@@ -61,15 +63,24 @@ def main():
         pin_memory=torch.cuda.is_available(),
     )
 
+    # 模型结构信息在训练前固定下来，并保存为 artifacts/model_config.json。
+    # 推理侧 (generate_tinystories.py / ModelRunner.from_checkpoint)
+    # 加载的是同一份 config，而不是从 checkpoint 猜测。
+    model_config = {
+        "vocab_size": tokenizer.vocab_size,
+        "context_length": context_length,
+        "d_model": 512,
+        "num_layers": 4,
+        "num_heads": 16,
+        "d_ff": 1344,
+        "rope_theta": 10_000,
+    }
+    save_model_config(model_config, MODEL_CONFIG_FILE)
+    print(f"Saved model config: {MODEL_CONFIG_FILE}")
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = TransformerLM(
-        vocab_size=tokenizer.vocab_size,
-        context_length=context_length,
-        d_model=512,
-        num_layers=4,
-        num_heads=16,
-        d_ff=1344,
-        rope_theta=10_000,
+        **model_config,
         device=device,
         dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
     )

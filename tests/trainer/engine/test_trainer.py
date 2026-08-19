@@ -72,8 +72,17 @@ def test_checkpoint(tmp_path):
         checkpoint_dir=tmp_path,
     )
     trainer.train(max_steps=2)
-    checkpoint = tmp_path / "checkpoint_2.pt"
-    assert checkpoint.exists()
+    latest = tmp_path / "latest.pt"
+    step = tmp_path / "step_2.pt"
+    assert latest.exists()
+    assert step.exists()
+
+    checkpoint = torch.load(step, map_location="cpu", weights_only=False)
+    assert "model" in checkpoint
+    assert "optimizer" in checkpoint
+    assert checkpoint["step"] == 2
+    assert "train_loss" in checkpoint
+
     model2 = TinyLM()
     optimizer2 = torch.optim.AdamW(model2.parameters(), lr=1e-3)
     trainer2 = Trainer(
@@ -82,5 +91,5 @@ def test_checkpoint(tmp_path):
         train_loader=loader,
         device="cpu",
     )
-    trainer2.load_checkpoint(checkpoint)
+    trainer2.load_checkpoint(step)
     assert trainer2.global_step == 2

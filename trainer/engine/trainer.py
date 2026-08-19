@@ -6,6 +6,8 @@ import torch
 from tqdm import tqdm
 
 from trainer.loss.cross_entropy import cross_entropy
+from trainer.utils.checkpoint import load_checkpoint as _load_checkpoint
+from trainer.utils.checkpoint import save_checkpoint as _save_checkpoint
 from trainer.utils.gradient_clip import gradient_clipping
 
 
@@ -56,6 +58,7 @@ class Trainer:
         data_iter = iter(self.train_loader)
         pbar = tqdm(range(max_steps), desc="Training")
         running_loss = 0.0
+        loss_value = None
         
         for _ in pbar:
             try:
@@ -109,9 +112,9 @@ class Trainer:
                     val_loss=f"{valid_metrics['valid/loss']:.4f}",
                     ppl=f"{valid_metrics['valid/ppl']:.2f}",
                 )
-                self.save_checkpoint()
+                self.save_checkpoint(train_loss=loss_value)
         
-        self.save_checkpoint()
+        self.save_checkpoint(train_loss=loss_value)
         return {"train_loss": running_loss / max_steps}
 
 
@@ -135,27 +138,41 @@ class Trainer:
         return {"valid/loss": loss, "valid/ppl": ppl}
 
 
-    def save_checkpoint(self):
+    def save_checkpoint(self, train_loss: float | None = None):
+        """Save the shared checkpoint format to ``latest.pt`` and ``step_N.pt``.
+
+        The ``"model"`` key and the ``"step"``/``"train_loss"`` fields are the
+        contract consumed by ``ModelRunner.from_checkpoint()``.
+        """
         if self.checkpoint_dir is None:
             return
-        checkpoint = {
-            "model": self.model.state_dict(),
-            "optimizer": self.optimizer.state_dict(),
-            "global_step": self.global_step,
-        }
-        if self.scheduler is not None:
-            checkpoint["scheduler"] = self.scheduler.state_dict()
-        path = self.checkpoint_dir / f"checkpoint_{self.global_step}.pt"
-        torch.save(checkpoint, path)
+        _save_checkpoint(
+            path=self.checkpoint_dir / "latest.pt",
+            model=self.model,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            step=self.global_step,
+            train_loss=train_loss,
+        )
+        _save_checkpoint(
+            path=self.checkpoint_dir / f"step_{self.global_step}.pt",
+            model=self.model,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+            step=self.global_step,
+            train_loss=train_loss,
+        )
 
 
     def load_checkpoint(self, path):
-        checkpoint = torch.load(path, map_location=self.device)
-        self.model.load_state_dict(checkpoint["model"])
-        self.optimizer.load_state_dict(checkpoint["optimizer"])
-        if self.scheduler is not None and "scheduler" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler"])
-        self.global_step = checkpoint["global_step"]
+        info = _load_checkpoint(
+            path,
+            model=self.model,
+            optimizer=self.optimizer,
+            scheduler=self.scheduler,
+        )
+        self.global_step = info["step"]
+        return info
 
 
     def _get_lr(self):

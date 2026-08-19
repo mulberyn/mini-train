@@ -2,6 +2,7 @@ from pathlib import Path
 import pytest
 import torch
 from inference.model_runner import ModelRunner
+from trainer.config import save_model_config
 from trainer.model.transformer import TransformerLM
 from trainer.tokenizer.bpe_tokenizer import BPETokenizer as Tokenizer
 
@@ -13,6 +14,16 @@ NUM_LAYERS = 2
 NUM_HEADS = 4
 D_FF = 64
 ROPE_THETA = 10000.0
+
+MODEL_CONFIG = {
+    "vocab_size": VOCAB_SIZE,
+    "context_length": CONTEXT_LENGTH,
+    "d_model": D_MODEL,
+    "num_layers": NUM_LAYERS,
+    "num_heads": NUM_HEADS,
+    "d_ff": D_FF,
+    "rope_theta": ROPE_THETA,
+}
 
 
 class DummyTokenizer:
@@ -73,6 +84,22 @@ def test_decode():
     runner = make_runner()
     ids = [97, 98, 99]
     text = runner.decode(ids)
+    assert text == "abc"
+
+
+def test_decode_tensor():
+    # Regression: ModelRunner.decode must accept a torch.Tensor (e.g. a row
+    # of the tensor returned by ModelRunner.generate) and convert it to ids.
+    runner = make_runner()
+    ids = torch.tensor([97, 98, 99])
+    text = runner.decode(ids)
+    assert text == "abc"
+
+
+def test_decode_tensor_on_device():
+    runner = make_runner()
+    ids = torch.tensor([97, 98, 99])
+    text = runner.decode(ids.to(runner.device))
     assert text == "abc"
 
 
@@ -201,6 +228,98 @@ def test_generate_respects_context_length():
     assert output.shape == (1, CONTEXT_LENGTH + 10)
 
 
+def test_stream_generate_yields_new_tokens():
+    runner = make_runner()
+    input_ids = torch.randint(0, VOCAB_SIZE, (1, 8))
+    tokens = list(runner.stream_generate(input_ids, max_new_tokens=5, do_sample=False))
+    assert len(tokens) == 5
+    assert all(token.shape == (1, 1) for token in tokens)
+    assert all(token.dtype == torch.long for token in tokens)
+
+
+def test_stream_generate_matches_generate():
+    runner = make_runner()
+    input_ids = torch.randint(0, VOCAB_SIZE, (1, 8))
+    tokens = list(runner.stream_generate(input_ids, max_new_tokens=8, do_sample=False))
+    full = runner.generate(input_ids, max_new_tokens=8, do_sample=False)
+    rebuilt = torch.cat([input_ids, *tokens], dim=-1)
+    torch.testing.assert_close(rebuilt, full)
+
+
+def test_stream_generate_zero_tokens():
+    runner = make_runner()
+    input_ids = torch.randint(0, VOCAB_SIZE, (1, 8))
+    assert list(runner.stream_generate(input_ids, max_new_tokens=0)) == []
+
+
+def test_stream_generate_respects_context_length():
+    runner = make_runner()
+    input_ids = torch.randint(0, VOCAB_SIZE, (1, CONTEXT_LENGTH))
+    tokens = list(runner.stream_generate(input_ids, max_new_tokens=10, do_sample=False))
+    assert len(tokens) == 10
+
+
+def test_stream_generate_eos_stops_early():
+    runner = make_runner()
+    input_ids = torch.tensor([[1, 2, 3]])
+    eos_token_id = 0
+    original_forward = runner.model.forward
+
+    def fake_forward(input_ids):
+        batch_size, seq_len = input_ids.shape
+        logits = torch.full((batch_size, seq_len, VOCAB_SIZE), -100.0)
+        logits[..., eos_token_id] = 100.0
+        return logits
+
+    runner.model.forward = fake_forward
+    try:
+        tokens = list(
+            runner.stream_generate(
+                input_ids, max_new_tokens=10, do_sample=False, eos_token_id=eos_token_id
+            )
+        )
+        assert len(tokens) == 1
+    finally:
+        runner.model.forward = original_forward
+
+
+def test_stream_generate_text_chunks_match_generate_text():
+    runner = make_runner()
+    chunks = list(runner.stream_generate_text("ab", max_new_tokens=5, do_sample=False))
+    assert len(chunks) == 5
+    assert all(isinstance(chunk, str) for chunk in chunks)
+    full = runner.generate_text("ab", max_new_tokens=5, do_sample=False)
+    assert "".join(chunks) == full[len("ab"):]
+
+
+def test_stream_generate_text_empty_prompt_raises():
+    runner = make_runner()
+    with pytest.raises(ValueError):
+        list(runner.stream_generate_text("", max_new_tokens=5, do_sample=False))
+
+
+def test_generate_temperature_zero_means_greedy():
+    runner = make_runner()
+    input_ids = torch.randint(0, VOCAB_SIZE, (1, 8))
+    torch.manual_seed(0)
+    out1 = runner.generate(input_ids, max_new_tokens=5, temperature=0.0, do_sample=True)
+    torch.manual_seed(0)
+    out2 = runner.generate(input_ids, max_new_tokens=5, temperature=0.0, do_sample=True)
+    torch.testing.assert_close(out1, out2)
+    greedy = runner.generate(input_ids, max_new_tokens=5, do_sample=False)
+    torch.testing.assert_close(out1, greedy)
+
+
+def test_stream_generate_temperature_zero_means_greedy():
+    runner = make_runner()
+    input_ids = torch.randint(0, VOCAB_SIZE, (1, 8))
+    tokens = list(runner.stream_generate(input_ids, max_new_tokens=5, temperature=0.0, do_sample=True))
+    assert len(tokens) == 5
+    greedy = runner.generate(input_ids, max_new_tokens=5, do_sample=False)
+    rebuilt = torch.cat([input_ids, *tokens], dim=-1)
+    torch.testing.assert_close(rebuilt, greedy)
+
+
 def test_generate_text():
     runner = make_runner()
     output = runner.generate_text("hello", max_new_tokens=5, do_sample=False)
@@ -226,10 +345,134 @@ def test_eos_stops_generation():
 
 
 def test_from_checkpoint(tmp_path: Path):
-    model = make_model()
-    checkpoint_path = tmp_path / "model.pt"
-    torch.save({"model_state_dict": model.state_dict()}, checkpoint_path)
-    assert checkpoint_path.exists()
+    """Round-trip: artifacts written by the training side load into a runner."""
+    artifacts = make_tiny_artifacts(tmp_path)
+    runner = ModelRunner.from_checkpoint(
+        checkpoint_path=artifacts["checkpoint_path"],
+        tokenizer_path=artifacts["tokenizer_path"],
+        model_config=artifacts["model_config"],
+        device="cpu",
+    )
+    assert runner.model.context_length == CONTEXT_LENGTH
+    assert runner.model.vocab_size == artifacts["model_config"]["vocab_size"]
+    text = runner.generate_text("the cat", max_new_tokens=5, do_sample=False)
+    assert isinstance(text, str)
+    assert len(text) > 0
+
+
+def test_from_checkpoint_legacy_model_state_dict_format(tmp_path: Path):
+    artifacts = make_tiny_artifacts(tmp_path)
+    checkpoint_path = tmp_path / "legacy.pt"
+    model = TransformerLM(**artifacts["model_config"], device="cpu", dtype=torch.float32)
+    torch.save({"model_state_dict": model.state_dict(), "step": 1}, checkpoint_path)
+    runner = ModelRunner.from_checkpoint(
+        checkpoint_path=str(checkpoint_path),
+        tokenizer_path=artifacts["tokenizer_path"],
+        model_config=artifacts["model_config"],
+        device="cpu",
+    )
+    assert runner.model.context_length == CONTEXT_LENGTH
+
+
+def test_from_checkpoint_raw_state_dict(tmp_path: Path):
+    artifacts = make_tiny_artifacts(tmp_path)
+    checkpoint_path = tmp_path / "raw.pt"
+    model = TransformerLM(**artifacts["model_config"], device="cpu", dtype=torch.float32)
+    torch.save(model.state_dict(), checkpoint_path)
+    runner = ModelRunner.from_checkpoint(
+        checkpoint_path=str(checkpoint_path),
+        tokenizer_path=artifacts["tokenizer_path"],
+        model_config=artifacts["model_config"],
+        device="cpu",
+    )
+    assert runner.model.context_length == CONTEXT_LENGTH
+
+
+def test_from_checkpoint_rejects_unsupported_format(tmp_path: Path):
+    artifacts = make_tiny_artifacts(tmp_path)
+    bad = tmp_path / "bad.pt"
+    torch.save({"optimizer": {"fake": 1}, "step": 1}, bad)
+    with pytest.raises(TypeError):
+        ModelRunner.from_checkpoint(
+            checkpoint_path=str(bad),
+            tokenizer_path=artifacts["tokenizer_path"],
+            model_config=artifacts["model_config"],
+            device="cpu",
+        )
+
+
+def test_from_checkpoint_missing_checkpoint(tmp_path: Path):
+    artifacts = make_tiny_artifacts(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        ModelRunner.from_checkpoint(
+            checkpoint_path=str(tmp_path / "missing.pt"),
+            tokenizer_path=artifacts["tokenizer_path"],
+            model_config=artifacts["model_config"],
+            device="cpu",
+        )
+
+
+def test_from_checkpoint_missing_tokenizer(tmp_path: Path):
+    artifacts = make_tiny_artifacts(tmp_path)
+    with pytest.raises(FileNotFoundError):
+        ModelRunner.from_checkpoint(
+            checkpoint_path=artifacts["checkpoint_path"],
+            tokenizer_path=str(tmp_path / "missing_tokenizer.json"),
+            model_config=artifacts["model_config"],
+            device="cpu",
+        )
+
+
+def make_tiny_artifacts(tmp_path: Path) -> dict:
+    """Write a tokenizer.json, model_config.json and a trainer-format
+    checkpoint (``{"model": ..., "step": ...}``) into ``tmp_path``.
+
+    Mirrors what ``examples/train_tinystories.py`` + ``Trainer`` produce,
+    so ``ModelRunner.from_checkpoint`` is tested against the real contract.
+    """
+    corpus = tmp_path / "corpus.txt"
+    corpus.write_text(
+        "\n".join(
+            [
+                "the cat sat on the mat",
+                "a dog ran in the park",
+                "tiny stories for tiny models",
+                "once upon a time there was a bird",
+            ]
+            * 20
+        ),
+        encoding="utf-8",
+    )
+    tokenizer = Tokenizer.train(
+        files=[str(corpus)],
+        vocab_size=300,
+        special_tokens=["<|endoftext|>"],
+    )
+    tokenizer_path = tmp_path / "tokenizer.json"
+    tokenizer.save(tokenizer_path)
+
+    model_config = {
+        "vocab_size": tokenizer.vocab_size,
+        "context_length": CONTEXT_LENGTH,
+        "d_model": D_MODEL,
+        "num_layers": NUM_LAYERS,
+        "num_heads": NUM_HEADS,
+        "d_ff": D_FF,
+        "rope_theta": ROPE_THETA,
+    }
+    config_path = tmp_path / "model_config.json"
+    save_model_config(model_config, config_path)
+
+    model = TransformerLM(**model_config, device="cpu", dtype=torch.float32)
+    checkpoint_path = tmp_path / "latest.pt"
+    torch.save({"model": model.state_dict(), "step": 42, "train_loss": 1.23}, checkpoint_path)
+
+    return {
+        "tokenizer_path": str(tokenizer_path),
+        "config_path": str(config_path),
+        "model_config": model_config,
+        "checkpoint_path": str(checkpoint_path),
+    }
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is not available")
