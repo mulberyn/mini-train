@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_tmp/
 .mypy_cache/
 .ruff_cache/
 
@@ -23,3 +24,4 @@ docs/plan.md
 /artifacts/
 /wandb/
 /docs/
+/.pytest_tmp/
