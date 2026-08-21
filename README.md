@@ -67,24 +67,59 @@ prefill + decode 的逐步 logits == 全序列 forward 的 logits（assert_close
 
 ### Paged Attention（`inference/attention/paged_attention.py`）
 
+统一接口 + 可插拔实现（`implementation=`）：
+
 ```python
 out = paged_attention(
     query, key_pool, value_pool, block_tables, context_lengths,
-    block_size=16, num_kv_heads=8,
+    block_size=16, num_kv_heads=8, implementation="torch",  # loop | torch | triton
 )
 ```
 
-第一版为正确性优先的 Python 参考实现，与稠密 attention（`dense_attention` /
-`F.scaled_dot_product_attention`）逐项对比测试通过。后续阶段将实现 C++/CUDA kernel。
+| implementation | 说明 | batch 扩展性 |
+| -------------- | ---- | ----------- |
+| `"loop"`  | 逐序列 Python 循环（正确性参考，O(B) 次 kernel launch） | O(B) ❌ |
+| `"torch"` | 批量向量化：一次 `key_cache[block_tables]` gather + 批量 matmul（默认） | ~flat ✅ |
+| `"triton"`| 原生 Triton kernel：每 (batch, head) 一个 program，flash-attention 在线 softmax（Linux+CUDA，本机自动跳过） | ~flat ✅ |
+
+与稠密 attention（`dense_attention` / `F.scaled_dot_product_attention`）逐项对比测试通过
+（`tests/inference/test_paged_attention.py`，含 GQA 与 fuzz）。
+
+### Paged Attention 性能优化（docs/paged_attention.md）
+
+核心问题：Python 逐序列循环导致 `runtime ≈ O(B)`。批量向量化后（RTX 5070 Ti, ctx=2048）：
+
+```text
+   B    ctx       loop        torch       dense
+   1   2048      2.628       0.427       2.889
+   8   2048     20.495       0.988       2.805
+  64   2048    175.274       6.360       5.052
+```
+
+loop 呈 O(B) 线性恶化（67x），torch 向量化实现接近持平 —— 消除 batch 并行瓶颈。
+
+系统级实验（`benchmark/attention/`）：
+
+- `benchmark_batch_scaling.py` — 实验 A：B = 1..64，ctx = 2048
+- `benchmark_page_size.py` — 实验 B：page = 8..256（展示 sweet spot 与 KV 碎片化）
+- `benchmark_memory.py` — 实验 C：Dense vs Paged 显存（ctx=512 时 paged 仅用 6.2%）
+- `benchmark_heterogeneous.py` — 实验 D：异长序列 Dense+padding vs Paged（2–5.6x）
+- `benchmark_paged_attention.py` — 三种实现 vs Dense SDPA 全矩阵
+
+profiler（`profiler/attention/profile_paged_attention.py`）直接展示 kernel launch 数：
+loop 为逐序列 kernel（CPU 162ms），torch 为单次 gather（CPU 8.6ms）。
 
 ### 快速验证
 
 ```bash
-python -m pytest tests -q -p no:cacheprovider --basetemp=.pytest_tmp
+python -m pytest tests -q -p no:cacheprovider --basetemp=.pytest_tmp_$PID   # 515 passed
 python -m benchmark.kv_cache.benchmark_compare --device cuda
-python -m benchmark.attention.benchmark_paged_attention --device cuda
+python -m benchmark.attention.benchmark_batch_scaling --device cuda
+python -m benchmark.attention.benchmark_page_size --device cuda
+python -m benchmark.attention.benchmark_heterogeneous --device cuda
 python -m profiler.kv_cache.profile_kv_cache --device cuda
 ```
 
-> 注：在 DSH 沙箱下运行 pytest 时需使用 `--basetemp=.pytest_tmp`（沙箱会把
-> `mode=0o700` 的目录转成不可枚举的 ACL，`conftest.py` 已做了兼容处理）。
+> 注：在 DSH 沙箱下运行 pytest 时需使用 `--basetemp=<workspace 内唯一路径>`（沙箱会把
+> `mode=0o700` 的目录转成不可枚举的 ACL，且不允许删除其他进程创建的目录，`conftest.py`
+> 已兼容 mode 问题，basetemp 建议每次用唯一名字如 `.pytest_tmp_$PID`）。

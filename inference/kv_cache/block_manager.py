@@ -96,7 +96,7 @@ class BlockManager:
         return self._blocks_handed_out
 
     def has_block(self, block_id: int) -> bool:
-        return block_id in self.allocated_blocks
+        return block_id in self.allocated_blocks    
 
     def get_block(self, block_id: int) -> Block:
         return self.allocated_blocks[block_id]

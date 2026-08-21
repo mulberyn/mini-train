@@ -6,6 +6,12 @@ The core property under test (docs/kv_cache.md section 十三):
 
 i.e. gathering K/V through the block table and computing attention must
 produce exactly the same result as dense attention over the gathered K/V.
+
+Implementation coverage (docs/paged_attention.md):
+
+* ``"loop"``   -- per-sequence Python loop (reference baseline)
+* ``"torch"``  -- batch-vectorized (default): must equal the loop
+* ``"triton"`` -- native Triton kernel (auto-skipped where triton is absent)
 """
 
 import math
@@ -13,7 +19,13 @@ import math
 import pytest
 import torch
 
-from inference.attention import dense_attention, paged_attention, paged_attention_from_cache
+from inference.attention import (
+    TRITON_AVAILABLE,
+    dense_attention,
+    paged_attention,
+    paged_attention_from_cache,
+    paged_attention_triton,
+)
 from inference.kv_cache.paged import PagedKVCache
 
 NUM_BLOCKS = 64
@@ -220,3 +232,161 @@ def test_paged_attention_empty_context_returns_zero(pools):
     query = torch.randn(1, NUM_KV_HEADS, HEAD_DIM)
     actual = paged_attention(query, key_cache, value_cache, block_tables, context_lengths, BLOCK_SIZE)
     torch.testing.assert_close(actual, torch.zeros_like(query))
+
+
+# --------------------------------------------------------------------------- #
+# Implementation equivalence (docs/paged_attention.md: loop vs torch vs triton)
+# --------------------------------------------------------------------------- #
+def test_unknown_implementation_raises(pools):
+    key_cache, value_cache = pools
+    block_tables = torch.randint(0, NUM_BLOCKS, (2, 2))
+    context_lengths = torch.tensor([5, 5])
+    query = torch.randn(2, NUM_KV_HEADS, HEAD_DIM)
+    with pytest.raises(ValueError, match="implementation"):
+        paged_attention(
+            query, key_cache, value_cache, block_tables, context_lengths,
+            BLOCK_SIZE, implementation="bogus",
+        )
+
+
+def test_vectorized_matches_loop_fuzz(pools):
+    """torch (vectorized) and loop implementations must agree exactly."""
+    key_cache, value_cache = pools
+    for _ in range(15):
+        batch = int(torch.randint(1, 6, ()).item())
+        ctx = int(torch.randint(1, 40, ()).item())
+        n_blocks = (ctx + BLOCK_SIZE - 1) // BLOCK_SIZE
+        block_tables = torch.randint(0, NUM_BLOCKS, (batch, n_blocks))
+        context_lengths = torch.full((batch,), ctx, dtype=torch.long)
+        query = torch.randn(batch, NUM_KV_HEADS, HEAD_DIM)
+
+        loop = paged_attention(
+            query, key_cache, value_cache, block_tables, context_lengths,
+            BLOCK_SIZE, num_kv_heads=NUM_KV_HEADS, implementation="loop",
+        )
+        vec = paged_attention(
+            query, key_cache, value_cache, block_tables, context_lengths,
+            BLOCK_SIZE, num_kv_heads=NUM_KV_HEADS, implementation="torch",
+        )
+        torch.testing.assert_close(vec, loop, rtol=1e-5, atol=1e-6)
+
+
+def test_vectorized_matches_loop_gqa(pools):
+    key_cache, value_cache = pools
+    num_heads, num_kv_heads = 8, 4
+    ctx = 23
+    block_tables = torch.randint(0, NUM_BLOCKS, (3, 3))
+    context_lengths = torch.tensor([23, 23, 23])
+    query = torch.randn(3, num_heads, HEAD_DIM)
+    loop = paged_attention(
+        query, key_cache, value_cache, block_tables, context_lengths,
+        BLOCK_SIZE, num_kv_heads=num_kv_heads, implementation="loop",
+    )
+    vec = paged_attention(
+        query, key_cache, value_cache, block_tables, context_lengths,
+        BLOCK_SIZE, num_kv_heads=num_kv_heads, implementation="torch",
+    )
+    torch.testing.assert_close(vec, loop, rtol=1e-6, atol=1e-7)
+
+
+def test_vectorized_rejects_unallocated_block(pools):
+    """The vectorized path must perform the same block-table validation."""
+    key_cache, value_cache = pools
+    block_tables = torch.tensor([[-1, 3]])
+    context_lengths = torch.tensor([5])
+    query = torch.randn(1, NUM_KV_HEADS, HEAD_DIM)
+    with pytest.raises(RuntimeError):
+        paged_attention(query, key_cache, value_cache, block_tables, context_lengths, BLOCK_SIZE)
+    block_tables = torch.tensor([[NUM_BLOCKS + 5, 3]])
+    with pytest.raises(IndexError):
+        paged_attention(query, key_cache, value_cache, block_tables, context_lengths, BLOCK_SIZE)
+
+
+def test_vectorized_rejects_too_few_block_columns(pools):
+    key_cache, value_cache = pools
+    block_tables = torch.zeros(1, 1, dtype=torch.long)
+    context_lengths = torch.tensor([3 * BLOCK_SIZE + 1])  # needs 4 blocks
+    query = torch.randn(1, NUM_KV_HEADS, HEAD_DIM)
+    with pytest.raises(IndexError):
+        paged_attention(query, key_cache, value_cache, block_tables, context_lengths, BLOCK_SIZE)
+
+
+# --------------------------------------------------------------------------- #
+# Triton kernel (runs on Linux + CUDA; auto-skipped on this Windows host)
+# --------------------------------------------------------------------------- #
+TRITON_SKIP = pytest.mark.skipif(
+    not TRITON_AVAILABLE, reason="triton is not installed on this host"
+)
+
+
+@TRITON_SKIP
+def test_triton_matches_dense(pools):
+    key_cache, value_cache = pools
+    for ctx in [1, 7, 8, 16, 31, 64]:
+        batch = 4
+        n_blocks = (ctx + BLOCK_SIZE - 1) // BLOCK_SIZE
+        block_tables = torch.randint(0, NUM_BLOCKS, (batch, n_blocks))
+        context_lengths = torch.full((batch,), ctx, dtype=torch.long)
+        query = torch.randn(batch, NUM_KV_HEADS, HEAD_DIM)
+        actual = paged_attention(
+            query, key_cache, value_cache, block_tables, context_lengths,
+            BLOCK_SIZE, num_kv_heads=NUM_KV_HEADS, implementation="triton",
+        )
+        expected = dense_reference(
+            query, key_cache, value_cache, block_tables, context_lengths, BLOCK_SIZE
+        )
+        torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+
+
+@TRITON_SKIP
+def test_triton_matches_torch(pools):
+    key_cache, value_cache = pools
+    ctx = 37
+    batch = 8
+    n_blocks = (ctx + BLOCK_SIZE - 1) // BLOCK_SIZE
+    block_tables = torch.randint(0, NUM_BLOCKS, (batch, n_blocks))
+    context_lengths = torch.full((batch,), ctx, dtype=torch.long)
+    query = torch.randn(batch, NUM_KV_HEADS, HEAD_DIM)
+    triton_out = paged_attention_triton(
+        query, key_cache, value_cache, block_tables, context_lengths,
+        BLOCK_SIZE, num_kv_heads=NUM_KV_HEADS,
+    )
+    torch_out = paged_attention(
+        query, key_cache, value_cache, block_tables, context_lengths,
+        BLOCK_SIZE, num_kv_heads=NUM_KV_HEADS, implementation="torch",
+    )
+    torch.testing.assert_close(triton_out, torch_out, rtol=1e-4, atol=1e-5)
+
+
+@TRITON_SKIP
+def test_triton_matches_torch_gqa(pools):
+    key_cache, value_cache = pools
+    num_heads, num_kv_heads = 8, 4
+    ctx = 25
+    block_tables = torch.randint(0, NUM_BLOCKS, (3, 4))
+    context_lengths = torch.tensor([25, 25, 25])
+    query = torch.randn(3, num_heads, HEAD_DIM)
+    triton_out = paged_attention_triton(
+        query, key_cache, value_cache, block_tables, context_lengths,
+        BLOCK_SIZE, num_kv_heads=num_kv_heads,
+    )
+    torch_out = paged_attention(
+        query, key_cache, value_cache, block_tables, context_lengths,
+        BLOCK_SIZE, num_kv_heads=num_kv_heads, implementation="torch",
+    )
+    torch.testing.assert_close(triton_out, torch_out, rtol=1e-4, atol=1e-5)
+
+
+def test_triton_raises_when_unavailable(pools):
+    """On hosts without triton the kernel must fail with a clear error."""
+    if TRITON_AVAILABLE:
+        pytest.skip("triton is available on this host")
+    key_cache, value_cache = pools
+    block_tables = torch.randint(0, NUM_BLOCKS, (2, 2))
+    context_lengths = torch.tensor([5, 5])
+    query = torch.randn(2, NUM_KV_HEADS, HEAD_DIM)
+    with pytest.raises(RuntimeError, match="triton"):
+        paged_attention(
+            query, key_cache, value_cache, block_tables, context_lengths,
+            BLOCK_SIZE, implementation="triton",
+        )
