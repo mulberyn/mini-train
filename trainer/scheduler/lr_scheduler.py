@@ -11,19 +11,6 @@ class LRScheduler:
         total_steps: Optional[int] = None,
         current_step: int = 0,
     ):
-        if max_lr <= 0:
-            raise ValueError("max_lr must be positive")
-        if min_lr < 0:
-            raise ValueError("min_lr must be non-negative")
-        if max_lr <= min_lr:
-            raise ValueError(f"max_lr ({max_lr}) must be greater than min_lr ({min_lr})")
-        if warmup_steps < 0:
-            raise ValueError("warmup_steps must be non-negative")
-        if total_steps is not None and total_steps <= warmup_steps:
-            raise ValueError("total_steps must be greater than warmup_steps")
-        if current_step < 0:
-            raise ValueError("current_step must be non-negative")
-
         self.max_lr = max_lr
         self.min_lr = min_lr
         self.warmup_steps = warmup_steps
@@ -33,18 +20,16 @@ class LRScheduler:
     
     def step(self) -> None:
         self.current_step += 1
-    
+        
     
     def get_lr(self) -> float:
         t = self.current_step
-        
         if t < self.warmup_steps:
             return self.max_lr * t / max(1, self.warmup_steps)
         if self.total_steps is None:
             return self.max_lr
         if t >= self.total_steps:
             return self.min_lr
-        
         progress = (t - self.warmup_steps) / (self.total_steps - self.warmup_steps)
         cosine = 0.5 * (1 + math.cos(math.pi * progress))
         return self.min_lr + (self.max_lr - self.min_lr) * cosine
