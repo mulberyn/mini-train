@@ -7,11 +7,31 @@ from trainer.layers.softmax import Softmax
 from trainer.attention.mask import causal_mask
 
 
+def causal_mask(
+    seq_len_q: int,
+    seq_len_k: int,
+    device: torch.device | None = None,
+) -> torch.Tensor:
+    q_positions = torch.arange(seq_len_q, device=device)
+    k_positions = torch.arange(seq_len_k, device=device)
+    return k_positions.unsqueeze(0) > q_positions.unsqueeze(1)
+
+
+def scaled_dot_product_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    causal: bool = True,
+) -> torch.Tensor:
+    attention = ScaledDotProductAttention(causal=causal)
+    return attention(q, k, v)
+
 class ScaledDotProductAttention(nn.Module):
     def __init__(self, causal: bool = True):
         super().__init__()
         self.causal = causal
         self.softmax = Softmax(dim=-1)
+    
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         scores = torch.matmul(q, k.transpose(-1, -2))
@@ -23,13 +43,3 @@ class ScaledDotProductAttention(nn.Module):
         probs = self.softmax(scores)
         output = torch.matmul(probs, v)
         return output
-
-
-def scaled_dot_product_attention(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
-    causal: bool = True,
-) -> torch.Tensor:
-    attention = ScaledDotProductAttention(causal=causal)
-    return attention(q, k, v)

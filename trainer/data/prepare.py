@@ -1,7 +1,7 @@
 from pathlib import Path
 import numpy as np
 from trainer.tokenizer.bpe_tokenizer import BPETokenizer
-from tqdm import tqdm   # 新增导入
+from tqdm import tqdm
 
 
 def tokenize_file(
