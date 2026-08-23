@@ -4,7 +4,6 @@ import torch
 from torch import nn
 
 from trainer.layers.softmax import Softmax
-from trainer.attention.mask import causal_mask
 
 
 def causal_mask(
@@ -25,6 +24,7 @@ def scaled_dot_product_attention(
 ) -> torch.Tensor:
     attention = ScaledDotProductAttention(causal=causal)
     return attention(q, k, v)
+
 
 class ScaledDotProductAttention(nn.Module):
     def __init__(self, causal: bool = True):

@@ -114,7 +114,7 @@ def main():
         checkpoint_dir=ARTIFACT_DIR / "checkpoints",
         use_wandb=True,
         wandb_project="miniLLM-engine",
-        wandb_run_name="tinystories",
+        wandb_run_name="tinystories-gqa",
     )
 
     trainer.train(max_steps=10_000)
