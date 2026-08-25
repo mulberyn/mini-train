@@ -6,7 +6,7 @@ from trainer.data.prepare import tokenize_file
 from trainer.data.dataloader import create_dataloader
 from trainer.model.transformer import TransformerLM
 from trainer.optimizer.adamw import AdamW
-from trainer.scheduler.lr_scheduler import LRScheduler
+from trainer.utils.lr_scheduler import LRScheduler
 from trainer.engine.trainer import Trainer
 
 
@@ -26,11 +26,7 @@ def main():
 
     if not TOKENIZER_FILE.exists():
         print("Training tokenizer...")
-        tokenizer = BPETokenizer.train(
-            files=[str(TRAIN_TEXT)],
-            vocab_size=10_000,
-            special_tokens=["<|endoftext|>"],
-        )
+        tokenizer = BPETokenizer.train(files=[str(TRAIN_TEXT)], vocab_size=10_000, special_tokens=["<|endoftext|>"])
         tokenizer.save(TOKENIZER_FILE)
     else:
         print("Loading tokenizer...")

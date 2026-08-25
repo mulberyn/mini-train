@@ -1,6 +1,6 @@
 import math
 import pytest
-from trainer.scheduler.lr_scheduler import LRScheduler
+from trainer.utils.lr_scheduler import LRScheduler
 
 
 def test_initial_step():

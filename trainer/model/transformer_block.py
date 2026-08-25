@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 from trainer.layers import RMSNorm, SwiGLU, RoPE
-from trainer.attention import MultiHeadAttention, MultiQueryAttention, GroupedQueryAttention
+from trainer.attention import GroupedQueryAttention
 
 
 class TransformerBlock(nn.Module):
@@ -25,7 +25,7 @@ class TransformerBlock(nn.Module):
         self.norm1 = RMSNorm(d_model, eps=1e-5, device=device, dtype=dtype)
         self.norm2 = RMSNorm(d_model, eps=1e-5, device=device, dtype=dtype)
         rope = RoPE(theta, d_k=d_model // num_heads, max_seq_len=max_seq_len, device=device, dtype=dtype)
-        self.gqa = GroupedQueryAttention(d_model, num_heads, 2, rope, device=device, dtype=dtype)
+        self.gqa = GroupedQueryAttention(d_model, num_heads, 8, rope, device=device, dtype=dtype)
         self.ffn = SwiGLU(d_model, d_ff, device=device, dtype=dtype)
 
     

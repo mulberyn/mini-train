@@ -6,7 +6,7 @@ def gradient_clipping(
     parameters: Iterable[torch.nn.Parameter],
     max_norm: float,
     norm_type: float = 2.0
-) -> float:
+) -> float: # L2 grad norm
     if max_norm <= 0:
         raise ValueError("max_norm must be positive")
     if norm_type <= 0:

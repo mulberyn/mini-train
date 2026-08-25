@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from trainer.engine.train_step import TrainStep
 from trainer.optimizer.adamw import AdamW
-from trainer.scheduler.lr_scheduler import LRScheduler
+from trainer.utils.lr_scheduler import LRScheduler
 
 
 class TinyLM(nn.Module):
