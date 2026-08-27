@@ -1,11 +1,11 @@
-# miniLLM-engine
+# nanotron-r1
 
 个人开发的从零开始的轻量级 LLM 引擎，旨在进行轻量且快捷的 LLM 训练及推理。
 
 ## 项目结构
 
 ```txt
-miniLLM-engine/
+nanotron-r1/
 ├── trainer/          # 训练
 ├── inference/        # 推理（ModelRunner / KV Cache / Attention / 缓存模型）
 ├── serving/          # FastAPI 服务
